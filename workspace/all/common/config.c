@@ -60,6 +60,7 @@ void CFG_defaults(NextUISettings *cfg)
         .showGameArt = CFG_DEFAULT_SHOWGAMEART,
         .gameSwitcherScaling = CFG_DEFAULT_GAMESWITCHERSCALING,
         .defaultView = CFG_DEFAULT_VIEW,
+        .libraryView = CFG_DEFAULT_LIBRARY_VIEW,
         .showQuickSwitcherUi = CFG_DEFAULT_SHOWQUICKWITCHERUI,
         .gameSwitcherCurtain = CFG_DEFAULT_GAMESWITCHER_CURTAIN,
 
@@ -264,6 +265,11 @@ void CFG_init(FontLoad_callback_t cb, ColorSet_callback_t ccb)
             {
                 // Old bool values (0/1) map directly: 0=off, 1=snappy.
                 CFG_setMenuTransitions(temp_value);
+                continue;
+            }
+            if (sscanf(line, "libraryView=%i", &temp_value) == 1)
+            {
+                CFG_setLibraryView(temp_value);
                 continue;
             }
             if (sscanf(line, "recents=%i", &temp_value) == 1)
@@ -812,6 +818,17 @@ int CFG_getThumbnailRadius(void)
 void CFG_setThumbnailRadius(int radius)
 {
     settings.thumbRadius = clamp(radius, 0, 24);
+    CFG_sync();
+}
+
+int CFG_getLibraryView(void)
+{
+    return settings.libraryView;
+}
+
+void CFG_setLibraryView(int view)
+{
+    settings.libraryView = view == LIBRARY_VIEW_ALL_GAMES ? view : CFG_DEFAULT_LIBRARY_VIEW;
     CFG_sync();
 }
 
@@ -1398,6 +1415,10 @@ void CFG_get(const char *key, char *value)
     {
         sprintf(value, "%i", CFG_getMenuTransitions());
     }
+    else if (strcmp(key, "libraryView") == 0)
+    {
+        sprintf(value, "%i", CFG_getLibraryView());
+    }
     else if (strcmp(key, "recents") == 0)
     {
         sprintf(value, "%i", CFG_getShowRecents());
@@ -1639,6 +1660,7 @@ void CFG_sync(void)
     fprintf(file, "batteryperc=%i\n", settings.showBatteryPercent);
     fprintf(file, "menuanim=%i\n", settings.showMenuAnimations);
     fprintf(file, "menutransitions=%i\n", settings.showMenuTransitions);
+    fprintf(file, "libraryView=%i\n", settings.libraryView);
     fprintf(file, "recents=%i\n", settings.showRecents);
     fprintf(file, "tools=%i\n", settings.showTools);
 	fprintf(file, "collections=%i\n", settings.showCollections);
@@ -1714,6 +1736,7 @@ void CFG_print(void)
     printf("\t\"batteryperc\": %i,\n", settings.showBatteryPercent);
     printf("\t\"menuanim\": %i,\n", settings.showMenuAnimations);
     printf("\t\"menutransitions\": %i,\n", settings.showMenuTransitions);
+    printf("\t\"libraryView\": %i,\n", settings.libraryView);
     printf("\t\"recents\": %i,\n", settings.showRecents);
     printf("\t\"tools\": %i,\n", settings.showTools);
 	printf("\t\"collections\": %i,\n", settings.showCollections);

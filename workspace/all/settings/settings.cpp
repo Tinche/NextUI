@@ -514,6 +514,11 @@ int main(int argc, char *argv[])
             []() -> std::any{ return (int)(CFG_getGameArtWidth() * 100); },
             [](const std::any &value) { CFG_setGameArtWidth((double)std::any_cast<int>(value) / 100.0); },
             []() { CFG_setGameArtWidth(CFG_DEFAULT_GAMEARTWIDTH);}});
+        appearanceItems.push_back(new MenuItem{ListItemType::Generic, "Library view", "Browse games by system or in one combined list",
+            {(int)LIBRARY_VIEW_SYSTEMS, (int)LIBRARY_VIEW_ALL_GAMES}, {"Systems", "All Games"},
+            []() -> std::any { return CFG_getLibraryView(); },
+            [](const std::any &value) { CFG_setLibraryView(std::any_cast<int>(value)); },
+            []() { CFG_setLibraryView(CFG_DEFAULT_LIBRARY_VIEW); }});
         appearanceItems.push_back(new MenuItem{ListItemType::Generic, "Show folder names at root", "Show folder names at root directory", {false, true}, on_off,
             []() -> std::any { return CFG_getShowFolderNamesAtRoot(); },
             [](const std::any &value) { CFG_setShowFolderNamesAtRoot(std::any_cast<bool>(value)); },

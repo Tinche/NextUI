@@ -55,6 +55,12 @@ enum {
 	SCREEN_OFF
 };
 
+// Game library organization (independent of the initial screen).
+enum {
+	LIBRARY_VIEW_SYSTEMS,
+	LIBRARY_VIEW_ALL_GAMES,
+};
+
 // Achievement sort order options
 enum {
 	RA_SORT_UNLOCKED_FIRST,
@@ -140,6 +146,7 @@ typedef struct
 	bool romsUseFolderBackground;
 	bool showQuickSwitcherUi;
 	int defaultView;
+	int libraryView;
 
 	// Mute switch
 	bool muteLeds;
@@ -241,6 +248,7 @@ typedef struct
 #define CFG_DEFAULT_GAMEARTWIDTH 0.45
 #define CFG_DEFAULT_WIFI false
 #define CFG_DEFAULT_VIEW SCREEN_GAMELIST
+#define CFG_DEFAULT_LIBRARY_VIEW LIBRARY_VIEW_SYSTEMS
 #define CFG_DEFAULT_SHOWQUICKWITCHERUI true
 #define CFG_DEFAULT_WIFI_DIAG false
 #define CFG_DEFAULT_SHOWTOOLS true
@@ -349,6 +357,10 @@ void CFG_setMenuTransitions(int mode);
 // Set thumbnail rounding radius.
 int CFG_getThumbnailRadius(void);
 void CFG_setThumbnailRadius(int radius);
+// Organize the library by system or show all games together.
+int CFG_getLibraryView(void);
+void CFG_setLibraryView(int view);
+
 // Show/hide recently played in the main menu.
 bool CFG_getShowRecents(void);
 void CFG_setShowRecents(bool show);

@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <msettings.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <dirent.h>
 #include <ctype.h>
 #include <unistd.h>
@@ -150,6 +151,7 @@ static Entry* Entry_new(char* path, int type) {
 
 static Entry* Entry_newNamed(char* path, int type, char* displayName) {
 	Entry *self = Entry_new(path, type);
+	free(self->name);
 	self->name = strdup(displayName);
 	return self;
 }
@@ -186,21 +188,27 @@ static void EntryArray_free(Array* self) {
 
 ///////////////////////////////////////
 
-#define INT_ARRAY_MAX 27
 typedef struct IntArray {
 	int count;
-	int items[INT_ARRAY_MAX];
+	int capacity;
+	int* items;
 } IntArray;
 static IntArray* IntArray_new(void) {
 	IntArray* self = malloc(sizeof(IntArray));
 	self->count = 0;
-	memset(self->items, 0, sizeof(int) * INT_ARRAY_MAX);
+	self->capacity = 27;
+	self->items = malloc(sizeof(int) * self->capacity);
 	return self;
 }
 static void IntArray_push(IntArray* self, int i) {
+	if (self->count == self->capacity) {
+		self->capacity *= 2;
+		self->items = realloc(self->items, sizeof(int) * self->capacity);
+	}
 	self->items[self->count++] = i;
 }
 static void IntArray_free(IntArray* self) {
+	free(self->items);
 	free(self);
 }
 
@@ -239,80 +247,64 @@ static void getUniqueName(Entry* entry, char* out_name) {
 	strcpy(tmp, ")");
 }
 
+// Apply aliases before flattening, while each entry still has its source folder.
+static Array* EntryArray_applyMap(Array* entries, const char* path) {
+	char map_path[PATH_MAX];
+	if (snprintf(map_path, sizeof(map_path), "%s/map.txt", path) >= sizeof(map_path))
+		return entries;
+	FILE* file = fopen(map_path, "r");
+	if (!file) return entries;
+
+	Hash* map = Hash_new();
+	char line[256];
+	while (fgets(line, sizeof(line), file)) {
+		normalizeNewline(line);
+		trimTrailingNewlines(line);
+		char* alias = strchr(line, '\t');
+		if (!alias) continue;
+		*alias++ = '\0';
+		Hash_set(map, line, alias);
+	}
+	fclose(file);
+
+	Array* visible = Array_new();
+	int resort = 0;
+	for (int i = 0; i < entries->count; i++) {
+		Entry* entry = entries->items[i];
+		char* alias = Hash_get(map, strrchr(entry->path, '/') + 1);
+		if (alias) {
+			free(entry->name);
+			entry->name = strdup(alias);
+			resort = 1;
+		}
+		if (alias && hide(entry->name)) Entry_free(entry);
+		else Array_push(visible, entry);
+	}
+	Array_free(entries);
+	Hash_free(map);
+	if (resort) EntryArray_sort(visible);
+	return visible;
+}
+
+static int isAllGamesDirectory(const char* path) {
+	return CFG_getLibraryView() == LIBRARY_VIEW_ALL_GAMES &&
+		(exactMatch(path, SDCARD_PATH) || exactMatch(path, ROMS_PATH));
+}
+
 static void Directory_index(Directory* self) {
     int is_collection = prefixMatch(COLLECTIONS_PATH, self->path);
-    int skip_index = exactMatch(FAUX_RECENT_PATH, self->path) || is_collection; // not alphabetized
-
-    Hash* map = NULL;
-    char map_path[256];
-    sprintf(map_path, "%s/map.txt", is_collection ? COLLECTIONS_PATH : self->path);
-
-    if (exists(map_path)) {
-        FILE* file = fopen(map_path, "r");
-        if (file) {
-            map = Hash_new();
-            char line[256];
-            while (fgets(line, 256, file) != NULL) {
-                normalizeNewline(line);
-                trimTrailingNewlines(line);
-                if (strlen(line) == 0) continue; // skip empty lines
-
-                char* tmp = strchr(line, '\t');
-                if (tmp) {
-                    tmp[0] = '\0';
-                    char* key = line;
-                    char* value = tmp + 1;
-                    Hash_set(map, key, strdup(value)); // Ensure strdup to store value properly
-                }
-            }
-            fclose(file);
-
-            int resort = 0;
-            int filter = 0;
-            for (int i = 0; i < self->entries->count; i++) {
-                Entry* entry = self->entries->items[i];
-                char* filename = strrchr(entry->path, '/') + 1;
-                char* alias = Hash_get(map, filename);
-                if (alias) {
-                    free(entry->name);  // Free before overwriting
-                    entry->name = strdup(alias);
-                    resort = 1;
-                    if (!filter && hide(entry->name)) filter = 1;
-                }
-            }
-
-            if (filter) {
-                Array* entries = Array_new();
-                for (int i = 0; i < self->entries->count; i++) {
-                    Entry* entry = self->entries->items[i];
-                    if (hide(entry->name)) {
-                        Entry_free(entry); // Ensure Entry_free handles all memory cleanup
-                    } else {
-                        Array_push(entries, entry);
-                    }
-                }
-                Array_free(self->entries);
-                self->entries = entries;
-            }
-            if (resort) EntryArray_sort(self->entries);
-        }
-    }
+    int skip_index = exactMatch(FAUX_RECENT_PATH, self->path) || is_collection;
+    int all_games = isAllGamesDirectory(self->path);
+    // Combined entries already have their source maps and system display labels.
+    if (!all_games)
+        self->entries = EntryArray_applyMap(self->entries, is_collection ? COLLECTIONS_PATH : self->path);
 
     Entry* prior = NULL;
     int alpha = -1;
     int index = 0;
     for (int i = 0; i < self->entries->count; i++) {
         Entry* entry = self->entries->items[i];
-        if (map) {
-            char* filename = strrchr(entry->path, '/') + 1;
-            char* alias = Hash_get(map, filename);
-            if (alias) {
-                free(entry->name);  // Free before overwriting
-                entry->name = strdup(alias);
-            }
-        }
-
-        if (prior != NULL && exactMatch(prior->name, entry->name)) {
+        if (!all_games && prior != NULL && exactMatch(prior->name, entry->name)) {
             free(prior->unique);
             free(entry->unique);
             prior->unique = NULL;
@@ -347,11 +339,11 @@ static void Directory_index(Directory* self) {
         prior = entry;
     }
 
-    if (map) Hash_free(map);  // Free the map at the end
 }
 
 static Array* getRoot(void);
 static Array* getRoms(void);
+static Array* getAllGames(void);
 static Array* getRecents(void);
 static Array* getCollection(char* path);
 static Array* getDiscs(char* path);
@@ -371,7 +363,7 @@ static Directory* Directory_new(char* path, int selected) {
 		self->entries = getRecents();
 	}
 	else if (exactMatch(path, ROMS_PATH)) {
-		self->entries = getRoms();
+		self->entries = CFG_getLibraryView() == LIBRARY_VIEW_ALL_GAMES ? getAllGames() : getRoms();
 	}
 	else if (!exactMatch(path, COLLECTIONS_PATH) && prefixMatch(COLLECTIONS_PATH, path) && suffixMatch(".txt", path)) {
 		self->entries = getCollection(path);
@@ -533,45 +525,34 @@ static Entry* entryFromPakName(char* pak_name)
 }
 
 static int hasEmu(char* emu_name) {
-	char pak_path[256];
+	char pak_path[PATH_MAX];
 	sprintf(pak_path, "%s/Emus/%s.pak/launch.sh", PAKS_PATH, emu_name);
 	if (exists(pak_path)) return 1;
 
 	sprintf(pak_path, "%s/Emus/%s/%s.pak/launch.sh", SDCARD_PATH, PLATFORM, emu_name);
 	return exists(pak_path);
 }
-static int hasCue(char* dir_path, char* cue_path) { // NOTE: dir_path not rom_path
-	char* tmp = strrchr(dir_path, '/') + 1; // folder name
-	sprintf(cue_path, "%s/%s.cue", dir_path, tmp);
-	return exists(cue_path);
+static int getGameFolderPath(const char* path, char* game_path) {
+	const char* name = strrchr(path, '/');
+	if (!name) return 0;
+	name++;
+	if (snprintf(game_path, 256, "%s/%s.cue", path, name) < 256 && exists(game_path)) return 1;
+	if (snprintf(game_path, 256, "%s/%s.m3u", path, name) < 256 && exists(game_path)) return 1;
+	game_path[0] = '\0';
+	return 0;
 }
 static int hasM3u(char* rom_path, char* m3u_path) { // NOTE: rom_path not dir_path
-	char* tmp;
-
-	strcpy(m3u_path, rom_path);
-	tmp = strrchr(m3u_path, '/') + 1;
-	tmp[0] = '\0';
-
-	// path to parent directory
-	char base_path[256];
-	strcpy(base_path, m3u_path);
-
-	tmp = strrchr(m3u_path, '/');
-	tmp[0] = '\0';
-
-	// get parent directory name
-	char dir_name[256];
-	tmp = strrchr(m3u_path, '/');
-	strcpy(dir_name, tmp);
-
-	// dir_name is also our m3u file name
-	tmp = m3u_path + strlen(m3u_path);
-	strcpy(tmp, dir_name);
-
-	// add extension
-	tmp = m3u_path + strlen(m3u_path);
-	strcpy(tmp, ".m3u");
-
+	char parent[256];
+	if (snprintf(parent, sizeof(parent), "%s", rom_path) >= sizeof(parent)) return 0;
+	char* slash = strrchr(parent, '/');
+	if (!slash) return 0;
+	*slash = '\0';
+	char* name = strrchr(parent, '/');
+	if (!name) return 0;
+	if (snprintf(m3u_path, 256, "%s/%s.m3u", parent, name + 1) >= 256) {
+		m3u_path[0] = '\0';
+		return 0;
+	}
 	return exists(m3u_path);
 }
 
@@ -857,7 +838,7 @@ static Array* getRoot(void) {
     if (hasRecents() && CFG_getShowRecents())
 		Array_push(root, Entry_new(FAUX_RECENT_PATH, ENTRY_DIR));
 
-	Array *entries = getRoms();
+	Array *entries = CFG_getLibraryView() == LIBRARY_VIEW_ALL_GAMES ? getAllGames() : getRoms();
 
 	// Handle collections
 	if (hasCollections() && CFG_getShowCollections()) {
@@ -1081,6 +1062,98 @@ static Array* getEntries(char* path){
 	return entries;
 }
 
+// Scan physical folders once: getRoms() intentionally collapses similarly named
+// systems for the normal browser, which would lose source folders in this view.
+static Array* getLibraryEntries(const char* path) {
+	Array* entries = Array_new();
+	DIR* dh = opendir(path);
+	if (!dh) return entries;
+	struct dirent* dp;
+	while ((dp = readdir(dh))) {
+		if (hide(dp->d_name)) continue;
+		// Launch/resume helpers use 256-byte paths. Reject paths they cannot hold.
+		char full_path[256];
+		if (snprintf(full_path, sizeof(full_path), "%s/%s", path, dp->d_name) >= sizeof(full_path)) continue;
+		struct stat st;
+		if (lstat(full_path, &st) != 0) continue;
+		// Never follow symlinks, including directory cycles and links outside Roms.
+		int type;
+		if (S_ISDIR(st.st_mode)) type = suffixMatch(".pak", full_path) ? ENTRY_PAK : ENTRY_DIR;
+		else if (S_ISREG(st.st_mode)) type = ENTRY_ROM;
+		else continue;
+		Array_push(entries, Entry_new(full_path, type));
+	}
+	closedir(dh);
+	return EntryArray_applyMap(entries, path);
+}
+
+static int compareLibraryEntries(const void* a, const void* b) {
+	const Entry* first = *(Entry**)a;
+	const Entry* second = *(Entry**)b;
+	int by_name = strcasecmp(first->name, second->name);
+	return by_name ? by_name : strcmp(first->path, second->path);
+}
+
+static void labelLibraryEntries(Array* entries) {
+	for (int start = 0; start < entries->count;) {
+		Entry* first = entries->items[start];
+		int end = start + 1;
+		while (end < entries->count && !strcasecmp(first->name, ((Entry*)entries->items[end])->name)) end++;
+		for (int i = start; i < end; i++) {
+			Entry* entry = entries->items[i];
+			char emu[256];
+			getEmuName(entry->path, emu);
+			int duplicate = 0;
+			for (int j = start; j < end; j++) {
+				if (i == j) continue;
+				char other_emu[256];
+				getEmuName(((Entry*)entries->items[j])->path, other_emu);
+				if (exactMatch(emu, other_emu)) { duplicate = 1; break; }
+			}
+			const char* detail = duplicate ? entry->path + strlen(ROMS_PATH) + 1 : emu;
+			size_t size = strlen(entry->name) + strlen(detail) + 4;
+			entry->unique = malloc(size);
+			snprintf(entry->unique, size, "%s (%s)", entry->name, detail);
+		}
+		start = end;
+	}
+}
+
+static Array* getAllGames(void) {
+	Array* games = Array_new();
+	Array* systems = getLibraryEntries(ROMS_PATH);
+	Array* pending = Array_new();
+	for (int i = 0; i < systems->count; i++) {
+		Entry* system = systems->items[i];
+		char emu[256];
+		getEmuName(system->path, emu);
+		if (system->type == ENTRY_DIR && hasEmu(emu)) Array_push(pending, strdup(system->path));
+	}
+	EntryArray_free(systems);
+
+	// Iterative traversal bounds open descriptors and avoids recursive stack growth.
+	while (pending->count) {
+		char* path = Array_pop(pending);
+		Array* entries = getLibraryEntries(path);
+		free(path);
+		for (int i = 0; i < entries->count; i++) {
+			Entry* entry = entries->items[i];
+			char game_path[256];
+			if (entry->type == ENTRY_DIR && !getGameFolderPath(entry->path, game_path)) {
+				Array_push(pending, strdup(entry->path));
+				Entry_free(entry);
+			} else {
+				Array_push(games, entry);
+			}
+		}
+		Array_free(entries);
+	}
+	Array_free(pending);
+	qsort(games->items, games->count, sizeof(void*), compareLibraryEntries);
+	labelLibraryEntries(games);
+	return games;
+}
+
 ///////////////////////////////////////
 
 static void queueNext(char* cmd) {
@@ -1137,11 +1210,7 @@ static void readyResumePath(char* rom_path, int type) {
 
 	char auto_path[256];
 	if (type==ENTRY_DIR) {
-		if (!hasCue(path, auto_path)) { // no cue?
-			tmp = strrchr(auto_path, '.') + 1; // extension
-			strcpy(tmp, "m3u"); // replace with m3u
-			if (!exists(auto_path)) return; // no m3u
-		}
+		if (!getGameFolderPath(path, auto_path)) return;
 		strcpy(path, auto_path); // cue or m3u if one exists
 	}
 
@@ -1173,7 +1242,9 @@ static void readyResumePath(char* rom_path, int type) {
 	}
 }
 static void readyResume(Entry* entry) {
-	readyResumePath(entry->path, entry->type);
+	can_resume = 0;
+	has_preview = 0;
+	if (entry) readyResumePath(entry->path, entry->type);
 }
 
 static void saveLast(char* path);
@@ -1271,7 +1342,13 @@ static void openRom(char* path, char* last) {
 	strcpy(sd_path, path);
 
 	char m3u_path[256];
-	int has_m3u = hasM3u(sd_path, m3u_path);
+	int has_m3u;
+	if (suffixMatch(".m3u", sd_path)) {
+		strcpy(m3u_path, sd_path);
+		has_m3u = 1;
+	} else {
+		has_m3u = hasM3u(sd_path, m3u_path);
+	}
 
 	char recent_path[256];
 	strcpy(recent_path, has_m3u ? m3u_path : sd_path);
@@ -1443,22 +1520,16 @@ Array* pathToStack(const char* path) {
 
 static void openDirectory(char* path, int auto_launch) {
 	char auto_path[256];
-	if (hasCue(path, auto_path) && auto_launch) {
-		openRom(auto_path, path);
-		return;
-	}
-
-	char m3u_path[256];
-	strcpy(m3u_path, auto_path);
-	char* tmp = strrchr(m3u_path, '.') + 1; // extension
-	strcpy(tmp, "m3u"); // replace with m3u
-	if (exists(m3u_path) && auto_launch) {
-		auto_path[0] = '\0';
-		if (getFirstDisc(m3u_path, auto_path)) {
+	if (auto_launch && getGameFolderPath(path, auto_path)) {
+		if (!suffixMatch(".m3u", auto_path)) {
 			openRom(auto_path, path);
 			return;
 		}
-		// TODO: doesn't handle empty m3u files
+		char disc_path[256];
+		if (getFirstDisc(auto_path, disc_path)) {
+			openRom(disc_path, path);
+			return;
+		}
 	}
 
 	// If this is the exact same directory for some reason, just return.
@@ -1538,7 +1609,7 @@ static void Entry_open(Entry* self) {
 	recent_alias = self->name;  // yiiikes
 	if (self->type==ENTRY_ROM) {
 		startgame = 1;
-		char *last = NULL;
+		char *last = isAllGamesDirectory(top->path) ? self->path : NULL;
 		if (prefixMatch(COLLECTIONS_PATH, top->path)) {
 			char* tmp;
 			char filename[256];
@@ -1584,6 +1655,24 @@ static void loadLast(void) { // call after loading root directory
 
 	char full_path[256];
 	strcpy(full_path, last_path);
+
+	if (isAllGamesDirectory(top->path) && prefixMatch(ROMS_PATH "/", full_path)) {
+		for (int i = 0; i < top->entries->count; i++) {
+			Entry* entry = top->entries->items[i];
+			size_t len = strlen(entry->path);
+			if (exactMatch(entry->path, full_path) ||
+				(entry->type == ENTRY_DIR && prefixMatch(ROMS_PATH "/", entry->path) &&
+				 strncmp(entry->path, full_path, len) == 0 && full_path[len] == '/')) {
+				top->selected = i;
+				top->start = i >= MAIN_ROW_COUNT ? i - MAIN_ROW_COUNT + 1 : 0;
+				top->end = MIN(top->start + MAIN_ROW_COUNT, top->entries->count);
+				readyResume(entry);
+				return;
+			}
+		}
+		// Hidden or removed ROMs must not reopen a physical system hierarchy.
+		return;
+	}
 
 	char* tmp;
 	char filename[256];
@@ -2385,6 +2474,7 @@ int main (int argc, char *argv[]) {
 					restore_end = 0;
 				}
 				Entry_open(selected);
+				total = top->entries->count;
 				if (top->entries->count > 0) readyResume(top->entries->items[top->selected]);
 				dirty = 1;
 			}
@@ -2574,7 +2664,7 @@ int main (int argc, char *argv[]) {
 				}
 			}
 
-			if (PAD_justRepeated(BTN_L1) && !PAD_isPressed(BTN_R1) && !PWR_ignoreSettingInput(BTN_L1, show_setting)) { // previous alpha
+			if (total > 0 && PAD_justRepeated(BTN_L1) && !PAD_isPressed(BTN_R1) && !PWR_ignoreSettingInput(BTN_L1, show_setting)) { // previous alpha
 				Entry* entry = top->entries->items[selected];
 				int i = entry->alpha-1;
 				if (i>=0) {
@@ -2587,7 +2677,7 @@ int main (int argc, char *argv[]) {
 					}
 				}
 			}
-			else if (PAD_justRepeated(BTN_R1) && !PAD_isPressed(BTN_L1) && !PWR_ignoreSettingInput(BTN_R1, show_setting)) { // next alpha
+			else if (total > 0 && PAD_justRepeated(BTN_R1) && !PAD_isPressed(BTN_L1) && !PWR_ignoreSettingInput(BTN_R1, show_setting)) { // next alpha
 				Entry* entry = top->entries->items[selected];
 				int i = entry->alpha+1;
 				if (i<top->alphas->count) {
@@ -2606,9 +2696,9 @@ int main (int argc, char *argv[]) {
 				dirty = 1;
 			}
 
-			Entry* entry = top->entries->items[top->selected];
+			Entry* entry = total > 0 ? top->entries->items[top->selected] : NULL;
 
-			if (dirty && total>0)
+			if (dirty)
 				readyResume(entry);
 
 			if (total>0 && can_resume && PAD_justReleased(BTN_RESUME)) {
@@ -2618,8 +2708,9 @@ int main (int argc, char *argv[]) {
 				dirty = 1;
 			}
 			else if (total>0 && PAD_justPressed(BTN_A)) {
+				int entry_type = entry->type;
 				Entry_open(entry);
-				if(entry->type == ENTRY_DIR) {
+				if(entry_type == ENTRY_DIR) {
 					animationdirection = SLIDE_LEFT;
 					total = top->entries->count;
 				}
@@ -2968,6 +3059,18 @@ int main (int argc, char *argv[]) {
 				switcherSur = GFX_captureRendererToSurface();
 				lastScreen = SCREEN_GAMESWITCHER;
 			}
+			else if (total == 0) {
+				is_scrolling = 0;
+				list_show_entry_names = false;
+				readyResume(NULL);
+				GFX_clearLayers(LAYER_BACKGROUND);
+				GFX_clearLayers(LAYER_THUMBNAIL);
+				GFX_blitMessage(font.large, isAllGamesDirectory(top->path) ? "No games" : "Empty folder",
+					screen, &(SDL_Rect){0, 0, screen->w, screen->h});
+				GFX_blitButtonGroup((char*[]){ "MENU", "MENU", NULL }, 0, screen, 0);
+				if (stack->count > 1) GFX_blitButtonGroup((char*[]){ "B", "BACK", NULL }, 1, screen, 1);
+				lastScreen = SCREEN_GAMELIST;
+			}
 			else { // if currentscreen == SCREEN_GAMELIST
 				// background and game art file path stuff
 				Entry* entry = top->entries->items[top->selected];
@@ -2995,7 +3098,7 @@ int main (int argc, char *argv[]) {
 				static int lastType = -1;
 
 				// this is only a choice on the root folder
-				list_show_entry_names = stack->count > 1 || CFG_getShowFolderNamesAtRoot();
+				list_show_entry_names = isAllGamesDirectory(top->path) || stack->count > 1 || CFG_getShowFolderNamesAtRoot();
 
 				// load folder background
 				char defaultBgPath[512];
@@ -3077,7 +3180,7 @@ int main (int argc, char *argv[]) {
 					SDL_Color text_color = uintToColour(THEME_COLOR4_255); // list text color
 					for (int i = top->start, j = 0; i < top->end; i++, j++) {
 						Entry* entry = top->entries->items[i];
-						char* entry_name = entry->name;
+						char* entry_name = entry->unique ? entry->unique : entry->name;
 						char* entry_unique = entry->unique;
 						int available_width = MAX(0,(had_thumb ? ox + SCALE1(BUTTON_MARGIN) : screen->w - SCALE1(BUTTON_MARGIN)) - SCALE1(PADDING * 2));
 						bool row_is_selected = (j == selected_row);
@@ -3090,7 +3193,7 @@ int main (int argc, char *argv[]) {
 						if (entry_unique) // Only render if a unique name exists
 							trimSortingMeta(&entry_unique);
 
-						char display_name[256];
+						char display_name[strlen(entry_name) + 1];
 						int text_width = GFX_getTextWidth(font.large, entry_unique ? entry_unique : entry_name, display_name, available_width, SCALE1(BUTTON_PADDING * 2));
 						int max_width = MIN(available_width, text_width);
 
@@ -3175,7 +3278,7 @@ int main (int argc, char *argv[]) {
 			if(animationdirection != ANIM_NONE) {
 				if(CFG_getMenuTransitions()) {
 					SDL_LockMutex(bgMutex);
-					if(folderbgbmp) {
+					if((currentScreen != SCREEN_GAMELIST || total > 0) && folderbgbmp) {
 						GFX_drawOnLayer(folderbgbmp, 0, 0, screen->w, screen->h, 1.0f, 0, LAYER_BACKGROUND);
 					} else {
 						GFX_clearLayers(LAYER_BACKGROUND);
@@ -3216,7 +3319,7 @@ int main (int argc, char *argv[]) {
 			if(lastScreen == SCREEN_QUICKMENU) {
 				SDL_LockMutex(bgMutex);
 				if(folderbgchanged) {
-					if(folderbgbmp)
+					if((currentScreen != SCREEN_GAMELIST || total > 0) && folderbgbmp)
 						GFX_drawOnLayer(folderbgbmp,0, 0, screen->w, screen->h,1.0f,0,LAYER_BACKGROUND);
 					else {
 						GFX_clearLayers(LAYER_BACKGROUND);
@@ -3228,7 +3331,7 @@ int main (int argc, char *argv[]) {
 			else if(lastScreen == SCREEN_GAMELIST) {
 				SDL_LockMutex(bgMutex);
 				if(folderbgchanged) {
-					if(folderbgbmp)
+					if((currentScreen != SCREEN_GAMELIST || total > 0) && folderbgbmp)
 						GFX_drawOnLayer(folderbgbmp,0, 0, screen->w, screen->h,1.0f,0,LAYER_BACKGROUND);
 					else {
 						GFX_clearLayers(LAYER_BACKGROUND);
@@ -3237,7 +3340,7 @@ int main (int argc, char *argv[]) {
 				}
 				SDL_UnlockMutex(bgMutex);
 				SDL_LockMutex(thumbMutex);
-				if(thumbbmp && thumbchanged) {
+				if(total > 0 && thumbbmp && thumbchanged) {
 					int img_w = thumbbmp->w;
 					int img_h = thumbbmp->h;
 					double aspect_ratio = (double)img_h / img_w;
@@ -3279,10 +3382,9 @@ int main (int argc, char *argv[]) {
 			// honestly this whole thing is here only for the scrolling text, I set it now to run this at 30fps which is enough for scrolling text, should move this to seperate animation function eventually
 			Uint32 now = SDL_GetTicks();
 			Uint32 frame_start = now;
-			static char cached_display_name[256] = "";
 			SDL_LockMutex(bgMutex);
 			if(folderbgchanged) {
-				if(folderbgbmp)
+				if((currentScreen != SCREEN_GAMELIST || total > 0) && folderbgbmp)
 					GFX_drawOnLayer(folderbgbmp,0, 0, screen->w, screen->h,1.0f,0,LAYER_BACKGROUND);
 				else {
 					GFX_clearLayers(LAYER_BACKGROUND);
@@ -3291,7 +3393,7 @@ int main (int argc, char *argv[]) {
 			}
 			SDL_UnlockMutex(bgMutex);
 			SDL_LockMutex(thumbMutex);
-			if(thumbbmp && thumbchanged) {
+			if((currentScreen != SCREEN_GAMELIST || total > 0) && thumbbmp && thumbchanged) {
 				int img_w = thumbbmp->w;
 				int img_h = thumbbmp->h;
 				double aspect_ratio = (double)img_h / img_w;
@@ -3326,22 +3428,19 @@ int main (int argc, char *argv[]) {
 				setAnimationDraw(0);
 			}
 			SDL_UnlockMutex(animMutex);
-			if (currentScreen != SCREEN_GAMESWITCHER && currentScreen != SCREEN_QUICKMENU) {
+			if (total > 0 && currentScreen != SCREEN_GAMESWITCHER && currentScreen != SCREEN_QUICKMENU) {
 				if(is_scrolling && pillanimdone && currentAnimQueueSize < 1) {
 					int ow = GFX_blitHardwareGroup(screen, show_setting);
 					Entry* entry = top->entries->items[top->selected];
-					trimSortingMeta(&entry->name);
-					char* entry_text = entry->name;
-					if (entry->unique) {
-						trimSortingMeta(&entry->unique);
-						entry_text = entry->unique;
-					}
+					char* entry_text = entry->unique ? entry->unique : entry->name;
+					trimSortingMeta(&entry_text);
 
 					int available_width = (had_thumb ? ox + SCALE1(BUTTON_MARGIN) : screen->w - SCALE1(BUTTON_MARGIN)) - SCALE1(PADDING * 2);
 					if (top->selected == top->start && !had_thumb) available_width -= ow;
 
 					SDL_Color text_color = uintToColour(THEME_COLOR5_255);
 
+					char cached_display_name[strlen(entry_text) + 1];
 					int text_width = GFX_getTextWidth(font.large, entry_text, cached_display_name, available_width, SCALE1(BUTTON_PADDING * 2));
 					int max_width = MIN(available_width, text_width);
 					int text_offset_y = (SCALE1(PILL_SIZE) - TTF_FontHeight(font.large) + 1) >> 1;
@@ -3409,9 +3508,9 @@ int main (int argc, char *argv[]) {
 		if (has_hdmi!=had_hdmi) {
 			had_hdmi = has_hdmi;
 
-			Entry* entry = top->entries->items[top->selected];
-			LOG_info("restarting after HDMI change... (%s)\n", entry->path);
-			saveLast(entry->path); // NOTE: doesn't work in Recents (by design)
+			Entry* entry = top->entries->count ? top->entries->items[top->selected] : NULL;
+			LOG_info("restarting after HDMI change... (%s)\n", entry ? entry->path : top->path);
+			saveLast(entry ? entry->path : top->path); // NOTE: doesn't work in Recents (by design)
 			sleep(1); // cable-seating debounce; the output switch itself happens at next app start
 			quit = 1;
 		}
