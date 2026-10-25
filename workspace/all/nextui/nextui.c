@@ -1099,6 +1099,18 @@ static void labelLibraryEntries(Array* entries) {
 		Entry* first = entries->items[start];
 		int end = start + 1;
 		while (end < entries->count && !strcasecmp(first->name, ((Entry*)entries->items[end])->name)) end++;
+		if (end == start + 1) {
+			start = end;
+			continue;
+		}
+		char first_emu[256];
+		getEmuName(first->path, first_emu);
+		int multiple_systems = 0;
+		for (int i = start + 1; i < end; i++) {
+			char emu[256];
+			getEmuName(((Entry*)entries->items[i])->path, emu);
+			if (!exactMatch(first_emu, emu)) { multiple_systems = 1; break; }
+		}
 		for (int i = start; i < end; i++) {
 			Entry* entry = entries->items[i];
 			char emu[256];
@@ -1111,6 +1123,17 @@ static void labelLibraryEntries(Array* entries) {
 				if (exactMatch(emu, other_emu)) { duplicate = 1; break; }
 			}
 			const char* detail = duplicate ? entry->path + strlen(ROMS_PATH) + 1 : emu;
+			// Within one system, the relative game path is enough to distinguish copies.
+			if (duplicate && !multiple_systems) {
+				const char* relative = strchr(detail, '/') + 1;
+				int ambiguous = 0;
+				for (int j = start; j < end; j++) {
+					if (i == j) continue;
+					const char* other = ((Entry*)entries->items[j])->path + strlen(ROMS_PATH) + 1;
+					if (exactMatch(relative, strchr(other, '/') + 1)) { ambiguous = 1; break; }
+				}
+				if (!ambiguous) detail = relative;
+			}
 			size_t size = strlen(entry->name) + strlen(detail) + 4;
 			entry->unique = malloc(size);
 			snprintf(entry->unique, size, "%s (%s)", entry->name, detail);

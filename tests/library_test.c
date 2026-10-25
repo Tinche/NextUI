@@ -145,8 +145,8 @@ static void makeLibrary(void) {
 	long_alias[sizeof(long_alias) - 1] = '\0';
 	char long_map[256];
 	snprintf(long_map, sizeof(long_map), "long.gb\t%s\n", long_alias);
-	writeFile(ROMS_PATH "/Game Boy (GB)/Long/long.gb", "");
-	writeFile(ROMS_PATH "/Game Boy (GB)/Long/map.txt", long_map);
+	writeFile(ROMS_PATH "/Game Boy (GB)/Long Folder/long.gb", "");
+	writeFile(ROMS_PATH "/Game Boy (GB)/Long Folder/map.txt", long_map);
 	writeFile(ROMS_PATH "/Game Boy (GB)/Long2/long.gb", "");
 	writeFile(ROMS_PATH "/Game Boy (GB)/Long2/map.txt", long_map);
 	// Bounds: these exceed the existing launch helpers' 256-byte path capacity.
@@ -161,8 +161,11 @@ static void makeLibrary(void) {
 static void testLibrary(void) {
 	Array* entries = getAllGames();
 	assert(entries->count == 14);
-	Entry* long_title = findEntry(entries, ROMS_PATH "/Game Boy (GB)/Long/long.gb");
+	Entry* long_title = findEntry(entries, ROMS_PATH "/Game Boy (GB)/Long Folder/long.gb");
 	assert(strlen(long_title->unique) > 255);
+	assert(strstr(long_title->unique, " (Long Folder/long.gb)"));
+	assert(!strstr(long_title->unique, "Game Boy"));
+	assert(strcmp(long_title->unique, findEntry(entries, ROMS_PATH "/Game Boy (GB)/Long2/long.gb")->unique));
 	Entry* same_gb = findEntry(entries, ROMS_PATH "/Game Boy (GB)/Same.gb");
 	Entry* same_gbc = findEntry(entries, ROMS_PATH "/Game Boy (GBC)/Same.gb");
 	Entry* same_nested = findEntry(entries, ROMS_PATH "/Game Boy (GB)/Other/Same.gb");
@@ -170,6 +173,10 @@ static void testLibrary(void) {
 	assert(strcmp(same_gb->unique, same_gbc->unique));
 	assert(strcmp(same_gb->unique, same_nested->unique));
 	assert(strstr(same_gbc->unique, "GBC"));
+	assert(!strcmp(same_gbc->unique, "Same (GBC)"));
+	assert(!findEntry(entries, ROMS_PATH "/Game Boy (GB)/rename.gb")->unique);
+	assert(!findEntry(entries, ROMS_PATH "/Game Boy (GB)/Nested/deep.gb")->unique);
+	assert(!findEntry(entries, ROMS_PATH "/PlayStation (PS)/Cue Game")->unique);
 	assert(!strcmp(findEntry(entries, ROMS_PATH "/Game Boy (GB)/rename.gb")->name, "Alias"));
 	assert(!strcmp(findEntry(entries, ROMS_PATH "/Game Boy (GB)/Nested/deep.gb")->name, "Deep Alias"));
 	assert(!strcmp(findEntry(entries, ROMS_PATH "/Game Boy (GBC)/color.gbc")->name, "Color Alias"));
